@@ -80,6 +80,17 @@ uv run mypy .                              # 타입 검사 (poetry: poetry run m
 - `async` 엔드포인트에서 동기 블로킹 I/O(동기 DB 드라이버, `requests`, `time.sleep`) 호출 금지.
 - 도메인 예외 → HTTP 변환(`HTTPException`)은 API 계층에서만 수행합니다.
 
+## MSA 구성 [선택]
+
+본 템플릿은 단일 FastAPI 서비스를 전제로 하되, 마이크로서비스(MSA)로 확장할 수 있습니다. 채택 기준·경계(bounded context) 설계·통신·데이터 소유권·운영 등 심층 원칙은 `msa_guideline/MSA_ARCHITECTURE.md`에 위임하고, 여기서는 Python(FastAPI) 요점만 둡니다.
+
+- 계층형(router → service → repository)은 **각 서비스 내부**의 구조로 그대로 유지합니다. MSA는 그 위에 서비스 분리·통신·데이터 소유권·운영 관심사를 더합니다.
+- 서비스마다 독립 FastAPI 앱/패키지/레포로 구성하고, 서비스 간에는 구현을 import하지 않고 계약(API/이벤트 스키마)으로만 결합합니다.
+- 서비스 간 동기 호출은 `httpx.AsyncClient`에 **timeout을 필수**로 설정합니다(async 규약 준수, `requests` 금지). 느슨한 결합·상태 전파가 중요하면 비동기 메시지(`{{BROKER}}`)를 선호합니다.
+- 관측성은 OpenTelemetry로 trace/correlation ID를 서비스 경계 너머로 전파하고, 로그에 `trace_id`를 포함합니다.
+- 각 서비스는 `/health`(liveness)·`/ready`(readiness)를 노출하고, `lifespan`으로 graceful startup/shutdown(진행 중 요청·메시지 처리 후 종료)을 구현합니다.
+- 라이브러리·코드 규약은 `docs/CODING_CONVENTION.md`의 "MSA 확장" 섹션, 문서화는 `docs/ISO_DOCUMENTS_CONVENTION.md`의 "MSA(다중 서비스) 문서화" 섹션을 참조합니다.
+
 ## ISO 문서
 
 - ISO 문서 규약은 `docs/ISO_DOCUMENTS_CONVENTION.md`를 참조합니다.

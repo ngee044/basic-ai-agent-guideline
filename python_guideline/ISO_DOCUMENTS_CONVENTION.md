@@ -243,6 +243,53 @@ Refs: FR-001, FR-003
 
 - 각 지표는 `docs/quality/QLT-001`에 목표값·측정 방법·현재값을 기록하고, 성능·신뢰성 지표는 `docs/test/`의 결과서와 연결합니다.
 
+## MSA(다중 서비스) 문서화
+
+시스템이 다중 서비스(MSA)로 구성될 때의 문서화 규약입니다. 심층 규약은 `msa_guideline/ISO_MSA_CONVENTION.md`에 위임하고, 여기서는 본 규약과의 접점만 정리합니다. 서비스 내부는 기존 계층형 문서 구조를 그대로 재사용합니다.
+
+### 문서 이원화 (시스템 레벨 + 서비스별)
+
+- 문서를 두 층으로 나눕니다. 시스템 레벨은 ISO/IEC/IEEE **15288**(시스템 생명주기) 관점으로 서비스 경계·상호작용·계약을 기술하고, 서비스별 문서는 기존 12207/29148/42010 구조(SRS·아키텍처·설계·API·테스트·추적성)를 서비스 단위로 반복합니다.
+
+```text
+docs/
+├── system/                       # 시스템 레벨(15288)
+│   ├── service-catalog.md        # 서비스 카탈로그(아래 표)
+│   ├── system-context.md         # 시스템 컨텍스트·경계·외부 연동
+│   └── interactions.md           # 서비스 간 상호작용·이벤트 흐름
+└── services/
+    └── {{SERVICE_NAME}}/          # 서비스별(기존 구조 재사용)
+        ├── requirements/  architecture/  design/  test/  traceability/
+        ├── api/openapi.json       # FastAPI OpenAPI 스냅샷
+        ├── api/*.proto            # gRPC 계약(사용 시)
+        └── events/*.md            # 발행/구독 이벤트 스키마
+```
+
+### 서비스 카탈로그
+
+- 시스템 전체 서비스를 한 표로 관리하여 소유권·계약·의존을 추적합니다.
+
+| 서비스 | bounded context | 소유 팀 | 저장소/패키지 | {{DB}} | 노출 계약 | 의존 서비스 |
+| --- | --- | --- | --- | --- | --- | --- |
+| {{SERVICE_NAME}} | 주문 | order-team | order-service | orders_db | `POST /orders` (REST), `OrderCreated` (event) | payment-service |
+
+### 계약 산출물
+
+- **REST**: 서비스별 FastAPI OpenAPI 스냅샷을 정본으로 삼습니다. 기존 dump 스크립트(도구·자동화 섹션)를 서비스마다 실행해 `docs/services/{{SERVICE_NAME}}/api/openapi.json`으로 고정합니다.
+- **gRPC**: `.proto`를 계약 산출물로 버전 관리하고 변경 이력을 남깁니다.
+- **이벤트**: 발행/구독 이벤트의 스키마(Pydantic 모델 또는 JSON Schema)·버전·호환성 정책을 문서화합니다.
+
+### 분산 추적성
+
+- 단일 서비스의 5단계 추적(요구사항 ⇄ 설계 ⇄ 코드 ⇄ 테스트 ⇄ API)에 **서비스**와 **서비스 간 계약/이벤트**를 축으로 추가합니다. 요구사항이 여러 서비스에 걸치면 서비스별 행으로 분해하여 경계를 넘는 흐름도 끊기지 않게 연결합니다.
+
+| 요구사항 ID | 서비스 | 코드 위치 | 계약/이벤트 | 테스트 |
+| --- | --- | --- | --- | --- |
+| FR-001 | order-service | `order_service/services/order_service.py::OrderService.create` | `POST /orders` (OpenAPI) → `OrderCreated` 발행 | `tests/services/test_order_service.py::test_create_order_success` |
+| FR-001 | payment-service | `payment_service/consumers/order_created.py::handle` | `OrderCreated` 구독 (event schema v1) | `tests/consumers/test_order_created.py::test_handle_idempotent` |
+
+- 서비스 경계를 넘는 요청은 correlation/trace ID로도 실증할 수 있어야 합니다(분산 추적, 코딩 규약의 관측성 섹션과 연계).
+
 ## 검증·적합성
 
 - **문서 리뷰 절차**

@@ -35,6 +35,14 @@ CppToolkit(C++23) 기반 C/C++ REST/서버 프로젝트 루트에 놓이는 Clau
   - (선택) `RestAPI`(예: Go/Gin): HTTP 진입점 → 메시지 큐 발행.
   - `.CppToolkit/` 또는 `.cpp_tool_kit/`: 공유 라이브러리 서브모듈.
 
+## MSA 구성
+
+- 각 프로세스/실행 파일(예: MainServer, MainServerConsumer, UserClient, (선택) RestAPI)을 하나의 **서비스 경계**로 취급합니다. 기존 다중 프로세스 구조가 곧 서비스 분할의 출발점이며, 계층형(handler/router → service → repository) 구조는 각 서비스 **내부** 구조로 그대로 유지합니다.
+- 외부 클라이언트 진입은 REST **게이트웨이**(`{{GATEWAY}}` — Go/Gin 또는 C++)로 단일화하고, 내부 서비스를 외부에 직접 노출하지 않습니다.
+- 서비스 간 통신은 상태 전파·느슨한 결합이 중요하면 `{{BROKER}}`(RabbitMQ/Kafka) 기반 **비동기**를, 즉시 응답이 필요하면 Boost.Asio/REST 기반 **동기**를 사용합니다(동기 호출 체인은 짧게 유지).
+- 기존 규약(오류 `std::expected`/`tuple`, 수명주기 설정→start→사용→stop→reset, Logger 싱글턴, 모듈별 종료 API 차이)을 그대로 재사용하며, 그 위에 계약·멱등성·관측성 전파·회복탄력성·독립 배포를 더합니다.
+- 채택 기준(기본 스탠스: modular-monolith-first, 정당화될 때 서비스로 추출)과 패턴 상세는 `msa_guideline/MSA_ARCHITECTURE.md`를 참조합니다.
+
 ## 기술 스택
 
 - 언어 표준: C++23 (`CMAKE_CXX_STANDARD 23`).

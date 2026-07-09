@@ -546,6 +546,151 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 - DB 접근은 ORM/파라미터 바인딩으로 SQL 인젝션을 방지합니다(문자열 포매팅 금지).
 - 비밀번호는 평문 저장 금지, 강한 해시(예: `bcrypt`/`argon2`)를 사용합니다.
 
+## MSA 확장(마이크로서비스) [선택]
+
+단일 서비스를 마이크로서비스로 확장할 때의 Python(FastAPI) 관용구를 규정합니다. 채택 기준·경계 설계 등 심층 원칙은 `msa_guideline/MSA_ARCHITECTURE.md`를 참조하고, 여기서는 실제 라이브러리와 코드 규약만 다룹니다. 계층형(router → service → repository)은 각 서비스 내부 구조로 유지합니다.
+
+### 멀티 서비스 구성
+
+- 서비스마다 독립 FastAPI 앱을 별 패키지/레포로 둡니다. 서비스 간에는 **구현을 import하지 않고** 계약(Pydantic/OpenAPI 스키마, gRPC `.proto`, 이벤트 스키마)으로만 결합합니다.
+- 공유 코드는 계약(스키마) 패키지로만 나누고, 도메인 로직·리포지토리 구현을 서비스 간에 공유하지 않습니다(공유 DB 금지, database-per-service).
+
+### 동기 통신 (REST / gRPC)
+
+- 서비스 간 REST 호출은 `httpx.AsyncClient`를 쓰고 **timeout을 반드시** 지정합니다(비동기 규약과 정합, `requests` 금지).
+
+```python
+import httpx
+
+# timeout 필수: 전체 기본 2초 + connect 1초. 타임아웃 없는 호출 금지.
+_timeout = httpx.Timeout(2.0, connect=1.0)
+
+async def fetch_user(client: httpx.AsyncClient, user_id: int) -> dict[str, object]:
+    resp = await client.get(f"/api/v1/users/{user_id}", timeout=_timeout)
+    resp.raise_for_status()
+    return resp.json()
+```
+
+- 클라이언트는 요청마다 새로 만들지 말고 애플리케이션 수명주기(`lifespan`)에 하나를 두고 재사용합니다(connection pool 재활용).
+- gRPC가 필요하면 `grpcio` + `grpcio-tools`로 `.proto`를 컴파일해 stub을 생성하고, async stub(`grpc.aio`)을 사용합니다. `.proto`는 계약 산출물로 버전 관리합니다.
+
+### 비동기 통신 (메시지/이벤트)
+
+- 브로커별 async 클라이언트를 사용합니다: RabbitMQ는 `aio-pika`, Kafka는 `aiokafka`. 여러 브로커를 추상화하려면 상위 프레임워크 `faststream`을 옵션으로 고려합니다.
+- **소비자는 idempotent해야** 합니다(at-least-once 전달 전제). idempotency key 또는 처리 이력(dedup)으로 중복 소비를 방어합니다.
+- async 경로에서 동기 블로킹 호출 금지(비동기 섹션 재확인).
+
+```python
+import aio_pika
+
+async def on_message(message: aio_pika.abc.AbstractIncomingMessage) -> None:
+    # process(): 정상 종료 시 ack, 예외 발생 시 nack(reject). 기본 requeue=False라 자동 재큐되지 않음.
+    # 실패 메시지를 재처리하려면 message.process(requeue=True) 또는 DLQ 정책을 명시합니다.
+    async with message.process():
+        event_id = message.headers["event_id"]
+        if await already_handled(event_id):   # dedup → idempotent 소비
+            return
+        await handle_event(message.body)
+        await mark_handled(event_id)
+```
+
+### 회복탄력성 (resilience)
+
+- 모든 원격 호출에 timeout(위 `httpx.Timeout`)을 둡니다.
+- 재시도는 `tenacity`로 exponential backoff + jitter를 적용하고, 대상 예외와 횟수를 제한합니다.
+
+```python
+import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential_jitter(initial=0.1, max=2.0),
+    retry=retry_if_exception_type(httpx.TransportError),   # 네트워크/전송 오류만 재시도
+)
+async def fetch_order(client: httpx.AsyncClient, order_id: int) -> httpx.Response:
+    resp = await client.get(f"/api/v1/orders/{order_id}", timeout=httpx.Timeout(2.0))
+    resp.raise_for_status()
+    return resp
+```
+
+- 반복 실패에는 circuit breaker를 적용합니다(예: `aiobreaker`, `purgatory` — 강제 아님). 자원 격리(bulkhead)와 실패 시 graceful degradation을 함께 설계합니다.
+
+### 신뢰성 있는 이벤트 발행 (transactional outbox)
+
+- 상태 변경과 이벤트 발행을 **한 트랜잭션**으로 묶어 dual write를 방지합니다. 비즈니스 데이터와 outbox row를 같은 SQLAlchemy 트랜잭션에서 커밋하고, 별도 publisher가 outbox를 폴링해 `{{BROKER}}`로 발행한 뒤 전송 표시합니다.
+
+```python
+from sqlalchemy.ext.asyncio import AsyncSession
+
+async def create_order(session: AsyncSession, cmd: CreateOrderCommand) -> Order:
+    order = Order.from_command(cmd)
+    session.add(order)
+    # 같은 트랜잭션에 이벤트를 outbox로 저장 → 원자성 보장(dual write 방지)
+    session.add(
+        OutboxMessage(
+            aggregate_id=order.id,
+            type="OrderCreated",
+            payload=OrderCreated.model_validate(order).model_dump(mode="json"),
+        )
+    )
+    await session.commit()
+    return order
+```
+
+- 발행 이벤트에는 이벤트 ID를 부여해 소비자 측 idempotency key로 활용합니다.
+
+### 관측성 (observability)
+
+- `opentelemetry-sdk`와 `opentelemetry-instrumentation-fastapi`로 분산 추적을 설정하고, trace context를 서비스 경계 너머로 전파합니다. 다운스트림 호출도 계측하면(`opentelemetry-instrumentation-httpx`) context가 자동 전파됩니다.
+
+```python
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+# 앱 생성 후 계측기 부착 (TracerProvider/exporter는 opentelemetry-sdk로 구성)
+FastAPIInstrumentor.instrument_app(app)
+```
+
+- 구조적 로깅(`structlog` 또는 표준 `logging`)에 `trace_id`/`request_id`를 포함해 로그와 trace를 연결합니다(로깅 섹션과 정합). 메트릭은 RED(Rate/Errors/Duration)를 기본으로 수집합니다.
+
+### 헬스체크 / 수명주기
+
+- 각 서비스는 `/health`(liveness)와 `/ready`(readiness)를 노출합니다. readiness는 DB·브로커 등 의존 자원의 준비 상태를 확인합니다.
+
+```python
+from fastapi import APIRouter, Response, status
+
+router = APIRouter(tags=["health"])
+
+@router.get("/health")   # liveness: 프로세스 생존만 확인
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+@router.get("/ready")    # readiness: 의존 자원 준비 여부
+async def ready(response: Response) -> dict[str, str]:
+    if not await dependencies_ready():
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "not-ready"}
+    return {"status": "ready"}
+```
+
+- 시작/정리와 graceful shutdown은 기존 규약대로 `lifespan`으로 관리합니다(클라이언트·브로커 연결 생성/해제, 진행 중 작업 완료 후 종료).
+
+### 계약 (contract)
+
+- Pydantic 스키마를 서비스 간 계약으로 사용하고, FastAPI OpenAPI 스냅샷(ISO 문서 규약의 dump 스크립트 재사용)을 계약 정본으로 고정합니다.
+- consumer-driven contract test로 호환성을 검증합니다(예: `schemathesis`로 OpenAPI 기반 속성 테스트, `pact-python`으로 소비자 주도 계약 테스트 — 강제 아님).
+
+### MSA 리뷰 체크리스트
+
+- [ ] 서비스 간 구현 import 없이 계약(스키마/`.proto`/이벤트)으로만 결합했습니다.
+- [ ] 모든 서비스 간 원격 호출에 timeout이 있고, `requests` 대신 `httpx.AsyncClient`를 씁니다.
+- [ ] 재시도는 backoff + jitter로 제한되고 대상 예외가 명시되었습니다.
+- [ ] 이벤트 소비자가 idempotent하고(dedup/idempotency key), 발행은 transactional outbox로 dual write를 피합니다.
+- [ ] trace/correlation ID가 경계 너머로 전파되고 로그에 `trace_id`가 포함됩니다.
+- [ ] `/health`·`/ready`가 노출되고 `lifespan`으로 graceful shutdown이 구현되었습니다.
+- [ ] 각 서비스가 자기 DB만 소유하고 다른 서비스 DB에 직접 접근하지 않습니다.
+
 ## 지양·금지 사항
 
 - `print`로 로깅 금지 → 구조적 로거 사용.

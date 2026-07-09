@@ -11,6 +11,7 @@
 | `cpp_guideline/` | C/C++ 프로젝트 가이드라인(`CLAUDE.md`, `CODING_CONVENTION.md`, `ISO_DOCUMENTS_CONVENTION.md`). |
 | `golang_guideline/` | Go(Gin) REST API 프로젝트 가이드라인(`CLAUDE.md`, `CODING_CONVENTION.md`, `ISO_DOCUMENTS_CONVENTION.md`). |
 | `python_guideline/` | Python(FastAPI) REST API 프로젝트 가이드라인(`CLAUDE.md`, `CODING_CONVENTION.md`, `ISO_DOCUMENTS_CONVENTION.md`). |
+| `msa_guideline/` | 언어 독립적인 MSA(마이크로서비스) 아키텍처·ISO 문서 규약 템플릿(`CLAUDE.md`, `MSA_ARCHITECTURE.md`, `ISO_MSA_CONVENTION.md`). |
 
 ## 사용법
 
@@ -22,6 +23,8 @@
 
 복사 후 문서 내 `{{PLACEHOLDER}}`(예: `{{PROJECT_NAME}}`, `{{MODULE_PATH}}`, `{{DB}}`)를 프로젝트 값으로 채워 사용합니다.
 `global_guideline/CLAUDE.md`는 프로젝트가 아닌 사용자 홈(`~/.claude/CLAUDE.md`)에 배치하는 전역 지침입니다.
+
+MSA(마이크로서비스) 시스템에 적용할 때는 `msa_guideline/`(공용 MSA 템플릿)과 각 서비스가 사용하는 언어 guideline(`golang_guideline/`, `python_guideline/`, `cpp_guideline/`)을 함께 사용합니다.
 
 ## 언어별 파일 링크
 
@@ -42,6 +45,12 @@
 - [cpp_guideline/CLAUDE.md](cpp_guideline/CLAUDE.md)
 - [cpp_guideline/CODING_CONVENTION.md](cpp_guideline/CODING_CONVENTION.md)
 - [cpp_guideline/ISO_DOCUMENTS_CONVENTION.md](cpp_guideline/ISO_DOCUMENTS_CONVENTION.md)
+
+### MSA(공용)
+
+- [msa_guideline/CLAUDE.md](msa_guideline/CLAUDE.md)
+- [msa_guideline/MSA_ARCHITECTURE.md](msa_guideline/MSA_ARCHITECTURE.md)
+- [msa_guideline/ISO_MSA_CONVENTION.md](msa_guideline/ISO_MSA_CONVENTION.md)
 
 ### 전역 지침
 

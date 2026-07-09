@@ -9,6 +9,7 @@
 - 문서 본문은 한국어로 작성하되, 기술 용어·라이브러리명·코드 식별자·CLI 명령어는 원문(영어) 그대로 유지합니다.
 - 프로젝트별로 채워야 하는 값은 `{{PLACEHOLDER}}` 형식으로 표기합니다(예: `{{PROJECT_NAME}}`, `{{MODULE_PATH}}`, `{{DB}}`).
 - 코드 예시는 해당 언어로 실제 동작하고 관용적(idiomatic)이어야 하며, 확실하지 않은 API/문법은 넣지 않습니다.
+- 사용자가 MSA(마이크로서비스) 지침을 요청하면, `msa_guideline/`(언어 독립적인 공용 MSA 템플릿: `CLAUDE.md`, `MSA_ARCHITECTURE.md`, `ISO_MSA_CONVENTION.md`)을 기준으로 각 서비스가 사용하는 언어 guideline(`golang_guideline/`, `python_guideline/`, `cpp_guideline/`)과 함께 제공합니다. 언어별 문서는 심층 원칙을 반복하지 않고 `msa_guideline/MSA_ARCHITECTURE.md`를 참조하도록 위임합니다.
 
 ## 전역 원칙(global_guideline/CLAUDE.md 준수)
 

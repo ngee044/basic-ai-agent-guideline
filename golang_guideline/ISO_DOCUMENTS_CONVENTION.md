@@ -186,6 +186,41 @@ Refs: REQ-F-001, REQ-NF-002
   - `Refs:` 트레일러에 관련 요구사항 ID를 나열하여 커밋↔요구사항 추적을 확보합니다.
 - API 명세 연계: `swaggo/swag` 주석의 `@Summary`/`@Router`에 대응하는 요구사항 ID를 설명에 포함해 API↔요구사항을 연결합니다.
 
+## MSA(다중 서비스) 문서화
+
+시스템이 여러 서비스로 구성되면 문서를 **시스템 레벨**과 **서비스별**로 이원화합니다. 심층 규약은 `msa_guideline/ISO_MSA_CONVENTION.md`를 따르며, 여기서는 Go 프로젝트에서의 적용 요점만 정리합니다.
+
+- **시스템 레벨(ISO/IEC/IEEE 15288)**: 단일 서비스에서는 참조 수준이던 15288을 실제 적용합니다. 시스템 범위, 서비스 경계(bounded context), 서비스 간 상호작용, 배포 토폴로지, 시스템 차원의 비기능 요구사항(가용성·일관성 모델 등)을 시스템 문서에 둡니다.
+- **서비스별 문서**: 각 서비스는 이 규약의 `docs/` 구조(SRS·아키텍처·설계·API·테스트·추적성)를 **자체적으로** 갖습니다. monorepo에서는 `docs/services/{{SERVICE_NAME}}/` 아래에, polyrepo에서는 각 서비스 저장소의 `docs/`에 둡니다.
+- **서비스 카탈로그**: 시스템 문서에 전체 서비스 목록({{SERVICE_LIST}})을 한 표로 관리합니다. 서비스명·bounded context·소유 팀·소유 데이터({{DB}})·노출 계약(OpenAPI/`.proto`)·의존 서비스·저장소 위치를 기록해 시스템 전체 조망과 역추적의 출발점으로 삼습니다.
+- **계약 문서**: 서비스별 API 계약은 기존 규약대로 관리합니다. REST는 `swaggo/swag` 주석에서 OpenAPI를 생성하고(`docs/api/`와 정합), gRPC는 `.proto`를 계약 원본으로 두고 `api/`에서 버전 관리합니다. 계약은 서비스 간 결합의 유일한 지점이므로 breaking change를 별도로 추적합니다.
+
+시스템 문서 트리 예시(서비스별 문서는 서비스마다 반복):
+
+```text
+docs/
+├── system/            # 시스템 레벨(15288): 범위·서비스 경계·상호작용·배포 토폴로지
+│   ├── SYSTEM.md
+│   └── SERVICE_CATALOG.md   # 서비스 카탈로그(전체 서비스 목록·소유·계약·의존)
+├── services/
+│   └── {{SERVICE_NAME}}/    # 서비스별 ISO 문서 일습(requirements/design/api/test/traceability)
+└── adr/               # 시스템/서비스 공통 결정 기록
+```
+
+### 분산 추적성
+
+단일 서비스의 5단계 추적(요구사항 → 설계 → 코드 → 테스트 → API)에 **서비스**와 **계약** 축을 더해, 시스템 요구사항이 어느 서비스의 어떤 코드·계약·테스트로 구현·검증되는지 양방향으로 잇습니다. 서비스 경계를 넘는 요구사항(예: saga로 처리되는 트랜잭션)은 관련된 모든 서비스 행으로 분해해 기록합니다.
+
+| 시스템 요구사항 | 서비스 | 코드 위치 | 계약 | 테스트 | 상태 |
+| --- | --- | --- | --- | --- | --- |
+| REQ-F-101 (주문 생성) | {{SERVICE_NAME}}(order) | `internal/order/service.(*Service).Create` | `POST /api/v1/orders` (OpenAPI) | `TestOrderService_Create` | 구현완료 |
+| REQ-F-101 (재고 예약, saga) | inventory | `internal/inventory/service.(*Service).Reserve` | `inventory.v1.ReserveStock` (`.proto`) | `TestInventory_Reserve` | 검증중 |
+| REQ-NF-101 (이벤트 유실 0) | order/inventory | `internal/order/outbox.Publisher` | `order.events.v1.OrderCreated` (이벤트 스키마) | `TestOutbox_PublishAtLeastOnce` | 구현중 |
+
+- 계약 열에는 REST 라우트, gRPC 메서드, 이벤트 스키마 중 실제 사용하는 계약을 표기합니다.
+- 서비스 카탈로그의 서비스 ID와 이 표의 "서비스" 열을 일치시켜 시스템 문서 ↔ 서비스 문서 간 링크를 유지합니다.
+- 상세 규약(문서 ID 체계 확장, 계약 버저닝, 시스템/서비스 문서 승인 흐름)은 `msa_guideline/ISO_MSA_CONVENTION.md`를 참조합니다.
+
 ## 품질 속성 매핑(ISO/IEC 25010)
 
 REST API 관점으로 8개 특성을 구체화하고 측정 지표 예를 제시합니다. 각 항목은 `REQ-NF-xxx`로 요구사항화하여 추적합니다.

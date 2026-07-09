@@ -556,6 +556,177 @@ row := db.QueryRowContext(ctx, "SELECT id, email FROM users WHERE id = '"+id+"'"
 - TLS: 외부 통신은 TLS를 사용합니다. 서버 자체 종단 또는 앞단 프록시/로드밸런서에서 TLS를 종단합니다.
 - 응답 헤더·에러 메시지로 내부 구현(스택 트레이스, 버전, 경로)을 노출하지 않습니다.
 
+## MSA 확장(마이크로서비스) [선택]
+
+단일 서비스를 넘어 여러 서비스로 구성할 때 적용하는 Go 관용구입니다. 계층형(`handler → service → repository`)은 **서비스 내부** 구조로 그대로 유지합니다. 서비스 분해·데이터 소유권·saga·CQRS 등 심층 원칙과 채택 기준은 `msa_guideline/MSA_ARCHITECTURE.md`를 따르며, 여기서는 Go 코드로의 구체화만 다룹니다.
+
+### 멀티 서비스 레이아웃
+
+- monorepo 기준으로 서비스마다 `cmd/{{SERVICE_NAME}}/main.go` 진입점을 둡니다. 서비스 내부 코드는 `internal/{{SERVICE_NAME}}/` 아래에 계층형으로 배치합니다.
+- 공유 코드(로깅·trace·config helper 등 도메인 무관 인프라)는 `internal/platform/` 또는 별도 모듈로 분리합니다.
+- 다른 서비스의 `internal/` 패키지를 직접 import하지 않습니다. 서비스 간 결합은 오직 **계약**(OpenAPI/`.proto`/이벤트 스키마)으로만 합니다(내부 구현 import 금지).
+
+### 동기 통신 (net/http · gRPC)
+
+- `net/http` 클라이언트 호출에는 반드시 `context.WithTimeout`으로 호출 단위 데드라인을 주고, `http.Client`에도 `Timeout`을 설정합니다. 타임아웃 없는 호출 체인을 만들지 않습니다.
+
+```go
+func (c *UserClient) GetUser(ctx context.Context, id string) (*User, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/users/"+id, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req) // c.httpClient = &http.Client{Timeout: 3 * time.Second}
+	if err != nil {
+		return nil, fmt.Errorf("call user service: %w", err)
+	}
+	defer resp.Body.Close()
+	// ... 상태코드 검사 후 디코딩
+}
+```
+
+- gRPC를 쓸 때는 `google.golang.org/grpc`와 `google.golang.org/protobuf`를 사용하고, 계약은 `.proto`로 정의해 `api/`에서 버전 관리합니다. 스텁은 코드 생성으로 만들고 손으로 수정하지 않습니다.
+
+```proto
+// api/user/v1/user.proto
+syntax = "proto3";
+package user.v1;
+option go_package = "{{MODULE_PATH}}/gen/user/v1;userv1";
+
+service UserService {
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+}
+
+message GetUserRequest { string id = 1; }
+message GetUserResponse { string id = 1; string email = 2; }
+```
+
+```bash
+# protoc-gen-go / protoc-gen-go-grpc 로 스텁 생성
+protoc --go_out=. --go-grpc_out=. api/user/v1/user.proto
+```
+
+  생성된 client 스텁 호출에도 데드라인이 담긴 `context.Context`를 그대로 전달합니다.
+
+### 비동기 통신 (메시지/이벤트)
+
+- {{BROKER}} 클라이언트로 이벤트를 발행/구독합니다(예: RabbitMQ는 `github.com/rabbitmq/amqp091-go`, Kafka는 `github.com/segmentio/kafka-go`).
+- 전달 보장은 대개 at-least-once이므로 **소비자는 idempotent**해야 합니다. `idempotency key`(메시지 ID)를 저장해 이미 처리한 메시지는 건너뜁니다.
+
+```go
+func (h *EventHandler) Handle(ctx context.Context, msgID string, payload []byte) error {
+	first, err := h.dedup.MarkProcessed(ctx, msgID) // 최초면 true, 중복이면 false
+	if err != nil {
+		return fmt.Errorf("dedup check: %w", err)
+	}
+	if !first {
+		return nil // 이미 처리된 메시지 — 재처리하지 않음
+	}
+	return h.svc.Apply(ctx, payload)
+}
+```
+
+### 회복탄력성
+
+- 모든 원격 호출에 `context` 타임아웃을 둡니다. 재시도는 무제한이 아니라 exponential backoff + jitter로 제한합니다(예: `github.com/cenkalti/backoff/v4` — `NewExponentialBackOff`는 기본적으로 jitter를 포함).
+
+```go
+op := func() error { return client.Call(ctx) }
+b := backoff.WithContext(backoff.NewExponentialBackOff(), ctx)
+if err := backoff.Retry(op, b); err != nil {
+	return fmt.Errorf("call after retries: %w", err)
+}
+```
+
+- 반복 실패로 다운스트림을 계속 때리지 않도록 circuit breaker를 둡니다(예: `github.com/sony/gobreaker`). 자원 격리가 필요하면 호출별 동시 실행 수를 세마포어로 제한(bulkhead)합니다.
+- 위 라이브러리는 예시이며 강제가 아닙니다. 팀 표준에 맞춰 선택하되, "timeout + 제한된 재시도 + circuit breaker"라는 조합은 유지합니다.
+
+### 신뢰성 있는 이벤트 발행 (transactional outbox)
+
+- DB 커밋과 메시지 발행을 따로 하면 이중 쓰기(dual write)로 유실·불일치가 생깁니다. 상태 변경과 **같은 DB 트랜잭션** 안에 이벤트를 `outbox` 테이블로 저장한 뒤, 별도 publisher가 outbox를 읽어 {{BROKER}}로 발행하고 발행 완료를 표시합니다.
+
+```go
+func (r *OrderRepo) CreateOrder(ctx context.Context, o *domain.Order, evt Event) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // 커밋되면 no-op
+
+	if err := insertOrder(ctx, tx, o); err != nil {
+		return err
+	}
+	if err := insertOutbox(ctx, tx, evt); err != nil { // 같은 트랜잭션에 이벤트 저장
+		return err
+	}
+	return tx.Commit()
+}
+```
+
+- 소비 측 idempotency와 짝을 이루어야 최종 일관성(eventual consistency)이 안전하게 성립합니다.
+
+### 관측성 (OpenTelemetry · 구조적 로깅)
+
+- 분산 추적은 `go.opentelemetry.io/otel`로 계측하고, 서비스 경계에서는 propagator로 trace context를 전파합니다. 부트스트랩 시 `otel.SetTextMapPropagator(propagation.TraceContext{})`(필요 시 `Baggage`와 조합)로 propagator를 등록하지 않으면 기본값이 no-op이라 헤더에 아무것도 주입되지 않으므로, 초기화 단계에서 반드시 등록합니다.
+
+```go
+// 부트스트랩(1회): W3C tracecontext 전파기 등록 — 미등록 시 아래 Inject가 no-op
+otel.SetTextMapPropagator(propagation.TraceContext{})
+
+// 발신 측: 나가는 요청 헤더에 trace context 주입
+otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+```
+
+- 로그(`log/slog`)에는 기존 로깅 규약대로 `request_id`를 넣고, 추가로 현재 span의 `trace_id`를 포함해 로그와 추적을 연결합니다.
+
+```go
+sc := trace.SpanContextFromContext(ctx)
+logger.Info("order created",
+	slog.String("request_id", reqID),
+	slog.String("trace_id", sc.TraceID().String()),
+	slog.String("order_id", o.ID),
+)
+```
+
+- 메트릭은 서비스마다 RED(Rate/Errors/Duration)를 최소 지표로 노출합니다.
+
+### 헬스체크·수명주기
+
+- 각 서비스는 liveness/readiness 엔드포인트를 노출합니다. liveness는 프로세스 생존만, readiness는 의존성(DB/브로커) 준비 상태까지 확인합니다.
+
+```go
+r.GET("/healthz", func(c *gin.Context) { c.Status(http.StatusOK) }) // liveness
+r.GET("/readyz", func(c *gin.Context) {                             // readiness
+	if err := db.PingContext(c.Request.Context()); err != nil {
+		c.Status(http.StatusServiceUnavailable)
+		return
+	}
+	c.Status(http.StatusOK)
+})
+```
+
+- graceful shutdown은 이 문서의 "Gin 사용 규약" 절 패턴을 그대로 재사용합니다(진행 중 요청/메시지를 마친 뒤 종료).
+
+### 계약 테스트
+
+- 서비스 간 계약(OpenAPI/`.proto`)을 스냅샷으로 버전 관리하고, 호환성 깨짐을 CI에서 검출합니다(`swag init`/`protoc` 재생성 후 `git diff --exit-code`).
+- 소비자-공급자 호환은 consumer-driven contract test로 지킵니다(예: Pact). 제공자는 소비자가 기대하는 계약을 검증 대상으로 삼습니다.
+
+### MSA 리뷰 체크리스트
+
+기존 "리뷰 체크리스트"에 더해, 다중 서비스 변경 시 아래를 추가로 확인합니다.
+
+- [ ] 다른 서비스의 `internal/` 직접 import 없음, 계약(OpenAPI/`.proto`/이벤트)으로만 결합.
+- [ ] 모든 원격 호출에 `context` 타임아웃·`http.Client.Timeout` 설정, 재시도는 backoff로 제한.
+- [ ] 메시지 소비자 idempotent(idempotency key/dedup), at-least-once 가정.
+- [ ] 이벤트 발행은 transactional outbox 사용(dual write 없음).
+- [ ] trace context 전파(발신 inject/수신 extract), 로그에 `trace_id`/`request_id` 포함.
+- [ ] `/healthz`·`/readyz` 노출, graceful shutdown 확인.
+- [ ] 계약 변경 시 스냅샷 재생성·`git diff` 게이트, contract test 통과.
+
 ## 지양·금지 사항
 
 - panic을 요청 처리 흐름 제어에 사용하기(Recovery 미들웨어의 안전망 목적 제외).

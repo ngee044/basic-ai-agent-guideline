@@ -62,6 +62,31 @@ golangci-lint run                 # 린터 (설정: .golangci.yml)
 └── docs/              # ISO 문서 + 규약 (CODING_CONVENTION.md, ISO_DOCUMENTS_CONVENTION.md)
 ```
 
+## MSA 구성 [선택]
+
+이 템플릿의 계층형 구조(`handler → service → repository`)는 그대로 유지하되, **각 서비스 "내부"의 구조**로 봅니다. 서비스 분리(bounded context)·서비스 간 통신·데이터 소유권·운영(관측성·회복탄력성) 등 서비스 경계 관심사의 심층 원칙은 `msa_guideline/MSA_ARCHITECTURE.md`를 따릅니다. 기본 스탠스는 "modular-monolith-first, 정당화될 때 서비스로 추출"입니다.
+
+Go 관점의 요점:
+
+- 멀티 서비스 레이아웃: 서비스마다 `cmd/{{SERVICE_NAME}}/main.go` 진입점을 두고(monorepo 기준), 공유 코드는 `internal/`(또는 별도 모듈)에 둡니다. 다른 서비스의 `internal/` 패키지를 직접 import하지 않고 계약(API/이벤트 스키마)으로만 결합합니다.
+- 서비스 간 통신: 즉시 응답이 필요하면 `net/http` 클라이언트 또는 gRPC로 동기 호출하고(모든 호출에 `context.WithTimeout` 필수), 상태 전파·느슨한 결합이 중요하면 {{BROKER}} 기반 비동기(event-driven)를 선호합니다.
+- trace 전파: `context.Context`를 서비스 경계까지 전파하고, correlation ID/trace ID를 요청 헤더로 넘겨 분산 추적을 잇습니다(상세는 `CODING_CONVENTION.md`의 "MSA 확장" 절).
+- 헬스체크·수명주기: 각 서비스는 `/healthz`(liveness)·`/readyz`(readiness)를 노출하고, 종료 시 graceful shutdown(기존 Gin 규약 재사용)으로 진행 중 요청/메시지를 마친 뒤 내려갑니다.
+
+monorepo 멀티 서비스 트리 예시(단일 서비스 레이아웃 위에 서비스 경계를 얹은 형태):
+
+```text
+{{SYSTEM_NAME}}/
+├── cmd/
+│   └── {{SERVICE_NAME}}/       # 서비스별 진입점(main.go). {{SERVICE_LIST}}의 각 서비스마다 하나
+├── internal/
+│   ├── {{SERVICE_NAME}}/       # 서비스별 내부: handler/service/repository (서비스마다)
+│   └── platform/              # 공유 인프라(로깅·trace·설정 등, 도메인 로직 아님)
+├── api/                       # 서비스별 계약: OpenAPI(.yaml)·gRPC(.proto)
+├── deploy/                    # 서비스별 컨테이너·오케스트레이션({{ORCHESTRATOR}})
+└── docs/                      # 시스템/서비스 ISO 문서
+```
+
 ## 핵심 규약 요약
 
 상세 규약은 `docs/CODING_CONVENTION.md`를 참조합니다. 아래는 요약입니다.
